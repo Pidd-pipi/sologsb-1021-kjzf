@@ -6,6 +6,7 @@ import ReviewPanel from '~/components/ReviewPanel.vue';
 import DuplicateMergeDialog from '~/components/DuplicateMergeDialog.vue';
 import DeleteImpactDialog from '~/components/DeleteImpactDialog.vue';
 import VersionDrawer from '~/components/VersionDrawer.vue';
+import BackupMergeDialog from '~/components/BackupMergeDialog.vue';
 import { useDictionaryStore } from '~/store/dictionary';
 import { referencesToEntry } from '~/utils/dictionary';
 import type { DictionaryEntry } from '~/types/dictionary';
@@ -52,6 +53,39 @@ const exportData = () => {
   URL.revokeObjectURL(url);
 };
 
+const fileInput = ref<HTMLInputElement | null>(null);
+const importError = ref('');
+
+const triggerImport = () => {
+  importError.value = '';
+  fileInput.value?.click();
+};
+
+const handleFile = (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const text = String(reader.result ?? '');
+    const ok = store.prepareImport(text);
+    if (!ok) {
+      importError.value = store.mergeSession.error || '载入失败，原工作区未受影响，可重试';
+      statusText.value = '备份载入失败：' + importError.value;
+      window.setTimeout(() => { statusText.value = '本地数据已同步'; }, 4000);
+    } else {
+      statusText.value = '已载入备份，请逐项确认冲突后写入';
+    }
+  };
+  reader.onerror = () => {
+    importError.value = '读取文件失败，原工作区未受影响';
+    statusText.value = importError.value;
+    window.setTimeout(() => { statusText.value = '本地数据已同步'; }, 4000);
+  };
+  reader.readAsText(file);
+};
+
 const moveEntry = (delta: number) => {
   const list = store.filteredEntries;
   const index = list.findIndex((entry) => entry.id === store.selectedId);
@@ -91,6 +125,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard));
         <t-button variant="text" theme="default" :disabled="!store.canUndo" @click="store.undo">撤销</t-button>
         <t-button variant="text" theme="default" :disabled="!store.canRedo" @click="store.redo">重做</t-button>
         <t-button variant="outline" theme="default" @click="exportData">导出备份</t-button>
+        <t-button variant="outline" theme="default" @click="triggerImport">导入备份</t-button>
         <t-button theme="primary" @click="store.createEntry">＋ 新建词条</t-button>
       </div>
     </header>
@@ -128,6 +163,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard));
       <DuplicateMergeDialog v-model="duplicateOpen" :pairs="store.duplicates" />
       <DeleteImpactDialog v-model="deleteOpen" :entry="deleteTarget" :impacts="impacts" @confirm="confirmDelete" />
       <VersionDrawer v-model="versionsOpen" />
+      <BackupMergeDialog v-model="store.mergeSession.open" />
+      <input ref="fileInput" type="file" accept="application/json,.json" style="display:none" @change="handleFile" />
     </ClientOnly>
   </div>
 </template>

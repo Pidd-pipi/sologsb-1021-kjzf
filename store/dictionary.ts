@@ -4,6 +4,7 @@ import type {
   AuditRecord, DictionaryEntry, DictionarySnapshot, DuplicatePair, EntryStatus, ReviewComment, VersionRecord
 } from '~/types/dictionary';
 import { findDuplicates } from '~/utils/dictionary';
+import { threeWayMerge, resolveMerge, type ConflictResolution, type MergeResult } from '~/utils/merge';
 
 const now = () => new Date().toISOString();
 const uid = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 9)}-${Date.now().toString(36)}`;
@@ -62,6 +63,15 @@ export const useDictionaryStore = defineStore('dictionary', () => {
   const hydrated = ref(false);
   const undoStack = ref<DictionarySnapshot[]>([]);
   const redoStack = ref<DictionarySnapshot[]>([]);
+  /** 三方合并的共同基线：上次导出或成功合入时的词条快照 */
+  const baselineEntries = ref<DictionaryEntry[]>(clone(entries));
+  /** 载入备份的合并会话状态 */
+  const mergeSession = reactive<{
+    open: boolean;
+    result: MergeResult | null;
+    original: DictionarySnapshot | null;
+    error: string;
+  }>({ open: false, result: null, original: null, error: '' });
   const query = ref('');
   const statusFilter = ref<EntryStatus | 'all'>('all');
   const dialectFilter = ref('all');
@@ -72,7 +82,8 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     revision: revision.value,
     entries: clone(entries),
     versions: clone(versions),
-    audit: clone(audit)
+    audit: clone(audit),
+    baseline: clone(baselineEntries.value)
   }));
   const duplicates = computed<DuplicatePair[]>(() => findDuplicates(entries));
   const openComments = computed(() => entries.reduce((sum, entry) => sum + entry.reviewerComments.filter((comment) => comment.status === 'open').length, 0));
@@ -93,7 +104,8 @@ export const useDictionaryStore = defineStore('dictionary', () => {
       revision: revision.value,
       entries: clone(entries),
       versions: clone(versions),
-      audit: clone(audit)
+      audit: clone(audit),
+      baseline: clone(baselineEntries.value)
     };
   }
 
@@ -102,6 +114,7 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     entries.splice(0, entries.length, ...(clone(value.entries ?? [])));
     versions.splice(0, versions.length, ...(clone(value.versions ?? [])));
     audit.splice(0, audit.length, ...(clone(value.audit ?? [])));
+    baselineEntries.value = clone(value.baseline ?? value.entries ?? []);
     if (!entries.some((entry) => entry.id === selectedId.value)) selectedId.value = entries[0]?.id ?? '';
   }
 
@@ -307,15 +320,75 @@ export const useDictionaryStore = defineStore('dictionary', () => {
   }
 
   function exportPackage() {
+    // 导出即建立新的共同基线：离线编辑后带回时以此为三方比较基准
+    baselineEntries.value = clone(entries);
     return JSON.stringify({ exportedAt: now(), ...persistableSnapshot.value }, null, 2);
+  }
+
+  /** 载入备份：解析校验后做三方合并，冲突项进入合并会话等待逐项选择 */
+  function prepareImport(jsonText: string): boolean {
+    mergeSession.error = '';
+    let data: DictionarySnapshot;
+    try {
+      data = JSON.parse(jsonText) as DictionarySnapshot;
+    } catch {
+      mergeSession.error = '无法解析备份文件，请确认是有效的 JSON';
+      return false;
+    }
+    if (!data || !Array.isArray(data.entries)) {
+      mergeSession.error = '备份文件缺少 entries 字段或格式不正确';
+      return false;
+    }
+    for (const item of data.entries) {
+      if (!item || typeof item.id !== 'string') {
+        mergeSession.error = '备份文件中的词条缺少 id 字段，无法合并';
+        return false;
+      }
+    }
+    // 保存当前工作区快照，失败或取消时可恢复并重试
+    mergeSession.original = snapshot();
+    // 优先用备份自带的基线，其次用本地记录的共同基线，都没有则以当前工作区为基线
+    const base = Array.isArray(data.baseline) && data.baseline.length ? clone(data.baseline) : clone(baselineEntries.value);
+    const result = threeWayMerge(base, entries, data.entries);
+    mergeSession.result = result;
+    mergeSession.open = true;
+    return true;
+  }
+
+  /** 应用用户对冲突的选择，完成合并并只记一个可撤销版本 */
+  function applyMerge(resolutions: Record<string, ConflictResolution>) {
+    const result = mergeSession.result;
+    if (!result) return;
+    const merged = resolveMerge(result, resolutions);
+    const affected = [...new Set([...result.addedEntryIds, ...result.removedEntryIds, ...result.conflicts.map((c) => c.entryId)])];
+    commit(
+      '合并备份',
+      `三方合并完成：新增 ${result.addedEntryIds.length} 条、移除 ${result.removedEntryIds.length} 条、自动合并 ${result.autoMergedFields} 处字段、${result.conflicts.length} 项冲突已逐项确认`,
+      affected,
+      () => { entries.splice(0, entries.length, ...merged); }
+    );
+    baselineEntries.value = clone(merged);
+    mergeSession.open = false;
+    mergeSession.result = null;
+    mergeSession.original = null;
+  }
+
+  /** 取消合并并恢复原工作区，可重新载入重试 */
+  function cancelMerge() {
+    if (mergeSession.original) restore(mergeSession.original);
+    mergeSession.open = false;
+    mergeSession.result = null;
+    mergeSession.original = null;
   }
 
   return {
     revision, entries, versions, audit, selectedId, hydrated, query, statusFilter, dialectFilter, fieldReplyDrafts,
     selectedEntry, filteredEntries, dialects, duplicates, openComments, persistableSnapshot,
+    baselineEntries, mergeSession,
     canUndo: computed(() => undoStack.value.length > 0), canRedo: computed(() => redoStack.value.length > 0),
     createEntry, updateField, setStatus, addVariant, updateVariant, removeVariant, addExample, updateExample, removeExample,
     addSource, updateSource, removeSource, setSynonyms, addComment, replyComment, toggleComment, deleteEntry, mergeEntries,
-    undo, redo, restoreVersion, hydrateFromBrowser, exportPackage
+    undo, redo, restoreVersion, hydrateFromBrowser, exportPackage,
+    prepareImport, applyMerge, cancelMerge
   };
 });

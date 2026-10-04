@@ -71,6 +71,8 @@ export interface DictionarySnapshot {
   entries: DictionaryEntry[];
   versions: VersionRecord[];
   audit: AuditRecord[];
+  /** 三方合并用的共同基线：上次导出或成功合入时的词条快照 */
+  baseline: DictionaryEntry[];
 }
 
 export interface DuplicatePair {
