@@ -1,9 +1,10 @@
 import { computed, reactive, ref } from 'vue';
 import { defineStore } from 'pinia';
 import type {
-  AuditRecord, DictionaryEntry, DictionarySnapshot, DuplicatePair, EntryStatus, ReviewComment, VersionRecord
+  AuditRecord, DictionaryEntry, DictionarySnapshot, DuplicatePair, EntryStatus, MergePlan, MergeResolution, ReviewComment, VersionRecord
 } from '~/types/dictionary';
 import { findDuplicates } from '~/utils/dictionary';
+import { createMergePlan, parseBackup, resolvePlan } from '~/utils/merge';
 
 const now = () => new Date().toISOString();
 const uid = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 9)}-${Date.now().toString(36)}`;
@@ -62,6 +63,8 @@ export const useDictionaryStore = defineStore('dictionary', () => {
   const hydrated = ref(false);
   const undoStack = ref<DictionarySnapshot[]>([]);
   const redoStack = ref<DictionarySnapshot[]>([]);
+  /** 三方比较的共同基线：最近一次成功合入（或初始化）时的工作区，供下次导入使用 */
+  const syncBase = ref<DictionaryEntry[]>(clone(seedEntries()));
   const query = ref('');
   const statusFilter = ref<EntryStatus | 'all'>('all');
   const dialectFilter = ref('all');
@@ -72,7 +75,8 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     revision: revision.value,
     entries: clone(entries),
     versions: clone(versions),
-    audit: clone(audit)
+    audit: clone(audit),
+    syncBase: clone(syncBase.value)
   }));
   const duplicates = computed<DuplicatePair[]>(() => findDuplicates(entries));
   const openComments = computed(() => entries.reduce((sum, entry) => sum + entry.reviewerComments.filter((comment) => comment.status === 'open').length, 0));
@@ -93,7 +97,8 @@ export const useDictionaryStore = defineStore('dictionary', () => {
       revision: revision.value,
       entries: clone(entries),
       versions: clone(versions),
-      audit: clone(audit)
+      audit: clone(audit),
+      syncBase: clone(syncBase.value)
     };
   }
 
@@ -102,6 +107,7 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     entries.splice(0, entries.length, ...(clone(value.entries ?? [])));
     versions.splice(0, versions.length, ...(clone(value.versions ?? [])));
     audit.splice(0, audit.length, ...(clone(value.audit ?? [])));
+    syncBase.value = clone(value.syncBase ?? []);
     if (!entries.some((entry) => entry.id === selectedId.value)) selectedId.value = entries[0]?.id ?? '';
   }
 
@@ -307,7 +313,54 @@ export const useDictionaryStore = defineStore('dictionary', () => {
   }
 
   function exportPackage() {
-    return JSON.stringify({ exportedAt: now(), ...persistableSnapshot.value }, null, 2);
+    // 把当前工作区一并写入共同基线：田野组在此分叉，回来时据此做三方比较
+    const payload = { exportedAt: now(), ...persistableSnapshot.value, syncBase: clone(entries) };
+    return JSON.stringify(payload, null, 2);
+  }
+
+  /**
+   * 预览备份：解析 + 三方比较，只产出冲突清单和合并方案，不改动工作区。
+   * 解析失败直接抛出，原工作区完全不动，用户可修复文件后重试。
+   */
+  function previewImport(rawText: string): MergePlan {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      throw new Error('文件不是合法的 JSON，请确认选择的是本工具导出的备份文件');
+    }
+    const pkg = parseBackup(parsed);
+    const versionBases = versions.map((version) => clone(version.before)).reverse();
+    return createMergePlan(entries, pkg, versionBases);
+  }
+
+  /**
+   * 按逐项选择落盘合并。整个过程先在副本上计算，任何异常都不会触碰工作区；
+   * 成功后只产生一个版本记录（一次撤销即可整体回退），并把合入结果设为新的共同基线。
+   */
+  function applyImport(plan: MergePlan, decisions: Record<string, MergeResolution | undefined>) {
+    const resolved = resolvePlan(plan, decisions, true);
+    const mergedEntries = clone(resolved.entries);
+    const { entriesAdded, entriesRemoved, entriesChanged, itemsAdded, conflicts } = resolved.stats;
+    const detail = `新增 ${entriesAdded} 条、移除 ${entriesRemoved} 条、修改 ${entriesChanged} 条，自动并入子项 ${itemsAdded} 处，逐项解决冲突 ${conflicts} 处`;
+
+    undoStack.value = [...undoStack.value.slice(-49), snapshot()];
+    redoStack.value = [];
+    const before = clone(entries);
+    const stamp = now();
+    resolved.touched.forEach((id) => {
+      const entry = mergedEntries.find((item) => item.id === id);
+      if (entry) entry.updatedAt = stamp;
+    });
+    entries.splice(0, entries.length, ...mergedEntries);
+    revision.value += 1;
+    syncBase.value = clone(entries);
+    if (!entries.some((entry) => entry.id === selectedId.value)) selectedId.value = entries[0]?.id ?? '';
+    versions.unshift({ id: uid('version'), at: now(), action: '三方合入备份', detail, entryId: undefined, before });
+    versions.splice(120);
+    audit.unshift({ id: uid('audit'), at: now(), action: '三方合入备份', detail, entryIds: [...resolved.touched] });
+    audit.splice(300);
+    return resolved.stats;
   }
 
   return {
@@ -316,6 +369,6 @@ export const useDictionaryStore = defineStore('dictionary', () => {
     canUndo: computed(() => undoStack.value.length > 0), canRedo: computed(() => redoStack.value.length > 0),
     createEntry, updateField, setStatus, addVariant, updateVariant, removeVariant, addExample, updateExample, removeExample,
     addSource, updateSource, removeSource, setSynonyms, addComment, replyComment, toggleComment, deleteEntry, mergeEntries,
-    undo, redo, restoreVersion, hydrateFromBrowser, exportPackage
+    undo, redo, restoreVersion, hydrateFromBrowser, exportPackage, previewImport, applyImport
   };
 });

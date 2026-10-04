@@ -71,6 +71,51 @@ export interface DictionarySnapshot {
   entries: DictionaryEntry[];
   versions: VersionRecord[];
   audit: AuditRecord[];
+  syncBase?: DictionaryEntry[];
+}
+
+export interface BackupPackage extends DictionarySnapshot {
+  exportedAt?: string;
+}
+
+export type MergeSide = 'ours' | 'theirs' | 'combine';
+export type MergeResolution = 'ours' | 'theirs' | 'combine' | 'keep' | 'remove';
+export type BaseSource = 'package' | 'history' | 'empty';
+
+export interface MergeConflict {
+  /** 形如 entry-002 / entry-002#definition / entry-002#variant#v-3#form 的稳定键 */
+  key: string;
+  kind: 'field' | 'presence' | 'itemPresence' | 'itemField';
+  entryId: string;
+  entryHeadword: string;
+  /** 字段或子项的中文路径，例如「释义」「方言变体 v-3 · 词形」 */
+  label: string;
+  /** 允许的逐项处理方式；仅文本字段允许 combine */
+  options: MergeResolution[];
+  ours: unknown;
+  theirs: unknown;
+  base: unknown;
+  combinable: boolean;
+  resolution?: MergeResolution;
+}
+
+export interface MergeStats {
+  entriesAdded: number;
+  entriesRemoved: number;
+  entriesChanged: number;
+  itemsAdded: number;
+  conflicts: number;
+}
+
+export interface MergePlan {
+  base: DictionaryEntry[];
+  baseSource: BaseSource;
+  ours: DictionaryEntry[];
+  theirs: DictionaryEntry[];
+  conflicts: MergeConflict[];
+  stats: MergeStats;
+  incomingRevision: number;
+  exportedAt?: string;
 }
 
 export interface DuplicatePair {

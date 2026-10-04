@@ -6,6 +6,7 @@ import ReviewPanel from '~/components/ReviewPanel.vue';
 import DuplicateMergeDialog from '~/components/DuplicateMergeDialog.vue';
 import DeleteImpactDialog from '~/components/DeleteImpactDialog.vue';
 import VersionDrawer from '~/components/VersionDrawer.vue';
+import ImportMergeDialog from '~/components/ImportMergeDialog.vue';
 import { useDictionaryStore } from '~/store/dictionary';
 import { referencesToEntry } from '~/utils/dictionary';
 import type { DictionaryEntry } from '~/types/dictionary';
@@ -14,8 +15,14 @@ const store = useDictionaryStore();
 const duplicateOpen = ref(false);
 const versionsOpen = ref(false);
 const deleteOpen = ref(false);
+const importOpen = ref(false);
 const deleteTarget = ref<DictionaryEntry | null>(null);
 const statusText = ref('本地数据已同步');
+
+const flashStatus = (text: string, ms = 3200) => {
+  statusText.value = text;
+  window.setTimeout(() => { statusText.value = '本地数据已同步'; }, ms);
+};
 
 const impacts = computed(() => deleteTarget.value ? referencesToEntry(store.entries, deleteTarget.value) : []);
 
@@ -29,14 +36,12 @@ const confirmDelete = () => {
   const name = deleteTarget.value.headword;
   store.deleteEntry(deleteTarget.value.id);
   deleteOpen.value = false;
-  statusText.value = `已删除“${name}”，可在版本记录中恢复`;
-  window.setTimeout(() => { statusText.value = '本地数据已同步'; }, 3200);
+  flashStatus(`已删除“${name}”，可在版本记录中恢复`);
 };
 
 const openDuplicates = () => {
   if (!store.duplicates.length) {
-    statusText.value = '当前没有检测到高度相似的重复词条';
-    window.setTimeout(() => { statusText.value = '本地数据已同步'; }, 2600);
+    flashStatus('当前没有检测到高度相似的重复词条', 2600);
     return;
   }
   duplicateOpen.value = true;
@@ -69,6 +74,7 @@ const keyboard = (event: KeyboardEvent) => {
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); store.redo(); return; }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') { event.preventDefault(); exportData(); return; }
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'i') { event.preventDefault(); importOpen.value = true; return; }
   if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'n') { event.preventDefault(); store.createEntry(); return; }
   if (editing) return;
   if (event.key === '/') { event.preventDefault(); document.querySelector<HTMLInputElement>('.entry-sidebar input')?.focus(); }
@@ -90,6 +96,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard));
       <div class="top-actions">
         <t-button variant="text" theme="default" :disabled="!store.canUndo" @click="store.undo">撤销</t-button>
         <t-button variant="text" theme="default" :disabled="!store.canRedo" @click="store.redo">重做</t-button>
+        <t-button variant="outline" theme="default" @click="importOpen = true">载入备份（三方合并）</t-button>
         <t-button variant="outline" theme="default" @click="exportData">导出备份</t-button>
         <t-button theme="primary" @click="store.createEntry">＋ 新建词条</t-button>
       </div>
@@ -115,7 +122,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard));
     <section class="bottom-bar">
       <div class="method-card"><span class="method-index">01</span><div><strong>字段级审校</strong><p>审校意见绑定到词形、发音、释义、例句或来源，编辑可逐条回复并解决。</p></div></div>
       <div class="method-card"><span class="method-index">02</span><div><strong>引用影响检查</strong><p>删除词条前扫描同义词、释义和例句引用，列出可能受影响的全部词条。</p></div></div>
-      <div class="method-card"><span class="method-index">03</span><div><strong>离线版本保护</strong><p>所有编辑在浏览器本地保存；撤销重做与版本恢复均保留提交前完整快照。</p></div></div>
+      <div class="method-card"><span class="method-index">03</span><div><strong>三方合入与版本保护</strong><p>载入田野备份时与共同基线、当前工作区三方比较：不同字段自动保留、冲突逐项选择、新增与单侧移除直接合入；成功只记一个可撤销版本，失败可恢复重试。</p></div></div>
       <div class="keyboard-card"><kbd>J/K</kbd><span>切换词条</span><kbd>/</kbd><span>搜索</span><kbd>D</kbd><span>查重</span><kbd>V</kbd><span>版本</span></div>
     </section>
 
@@ -128,6 +135,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', keyboard));
       <DuplicateMergeDialog v-model="duplicateOpen" :pairs="store.duplicates" />
       <DeleteImpactDialog v-model="deleteOpen" :entry="deleteTarget" :impacts="impacts" @confirm="confirmDelete" />
       <VersionDrawer v-model="versionsOpen" />
+      <ImportMergeDialog v-model="importOpen" @merged="flashStatus" />
     </ClientOnly>
   </div>
 </template>
